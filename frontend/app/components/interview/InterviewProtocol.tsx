@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   Sparkles,
   Zap,
@@ -12,6 +12,8 @@ import {
 import { InterviewerAvatar } from "./InterviewerAvatar";
 import { DocumentUploadCard } from "./DocumentUploadCard";
 import { PreInterviewAnalysis } from "./PreInterviewAnalysis";
+import { LiveInterviewScreen } from "./LiveInterviewScreen";
+import { getApiUrl } from "../../lib/api";
 
 const DOMAINS = [
   "Full Stack Development",
@@ -62,7 +64,28 @@ export const InterviewProtocol: React.FC = () => {
   
   const [isInitializing, setIsInitializing] = useState<boolean>(false);
   const [isReady, setIsReady] = useState<boolean>(false);
+  const [createdInterviewId, setCreatedInterviewId] = useState<string | null>(null);
+  const [activeLiveInterviewId, setActiveLiveInterviewId] = useState<string | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
+
+  // Resume active session on page reload if exists
+  useEffect(() => {
+    try {
+      const storedId = localStorage.getItem("vocalis_active_interview_id");
+      if (storedId) {
+        fetch(getApiUrl(`/api/interview/${storedId}/state`))
+          .then((res) => res.json())
+          .then((json) => {
+            if (json.status === "success" && json.data?.status === "in_progress") {
+              setActiveLiveInterviewId(storedId);
+            }
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // LocalStorage fallback
+    }
+  }, []);
 
   const handleJdExtracted = (data: any) => {
     setJdData(data);
@@ -87,7 +110,7 @@ export const InterviewProtocol: React.FC = () => {
 
     try {
       // Persist Phase 1 Intake Session
-      const res = await fetch("http://127.0.0.1:8005/api/interview/create", {
+      const res = await fetch(getApiUrl("/api/interview/create"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -99,10 +122,16 @@ export const InterviewProtocol: React.FC = () => {
         }),
       });
 
+      const json = await res.json();
       if (!res.ok) {
-        throw new Error("Failed to initialize interview session.");
+        throw new Error(json.detail || "Failed to initialize interview session.");
       }
 
+      setCreatedInterviewId(json.interview_id);
+      try {
+        localStorage.setItem("vocalis_active_interview_id", json.interview_id);
+      } catch {}
+      
       setIsReady(true);
     } catch (err: any) {
       setSessionError(err.message || "Failed to persist intake configuration.");
@@ -110,24 +139,46 @@ export const InterviewProtocol: React.FC = () => {
     }
   };
 
+  const handleStartLiveAssessment = (id: string) => {
+    setActiveLiveInterviewId(id);
+  };
+
   const handleReset = () => {
     setResumeData(null);
     setJdData(null);
     setIsInitializing(false);
     setIsReady(false);
+    setCreatedInterviewId(null);
+    setActiveLiveInterviewId(null);
     setSessionError(null);
+    try {
+      localStorage.removeItem("vocalis_active_interview_id");
+    } catch {}
   };
 
-  if (isReady) {
+  // ─── Live Assessment Screen (Phase 2) ───
+  if (activeLiveInterviewId) {
+    return (
+      <LiveInterviewScreen
+        interviewId={activeLiveInterviewId}
+        onExit={handleReset}
+      />
+    );
+  }
+
+  // ─── Initialization Pipeline Screen ───
+  if (isReady && createdInterviewId) {
     return (
       <div className="relative z-10 w-full max-w-5xl mx-auto px-4 py-8">
         <PreInterviewAnalysis
+          interviewId={createdInterviewId}
           resumeData={resumeData}
           jdData={jdData}
           domain={selectedDomain}
           experienceLevel={experienceLevel}
           programmingLanguage={programmingLanguage}
           onReset={handleReset}
+          onStartInterview={handleStartLiveAssessment}
         />
       </div>
     );
@@ -144,7 +195,7 @@ export const InterviewProtocol: React.FC = () => {
             <span className="px-2.5 py-0.5 rounded-full bg-cyan-950/80 border border-cyan-500/40 text-cyan-400 text-[10px] font-bold tracking-widest uppercase">
               AGENTIC PROTOCOL
             </span>
-            <span className="text-[10px] text-gray-400">PHASE 1 INTAKE</span>
+            <span className="text-[10px] text-gray-400">PHASE 2 ADAPTIVE ENGINE READY</span>
           </div>
 
           <h1 className="text-2xl sm:text-3xl font-black text-cyan-300 tracking-wider">

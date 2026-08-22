@@ -27,6 +27,10 @@ htmlcov/
 
 # Data, Config Vault & Workspace Sandbox
 contacts.csv
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 jarvis.db
 backend/jarvis.db
 backend/workspace/
@@ -35,6 +39,14 @@ backend/workspace/
 backend/.env
 .key
 .vault
+credentials.json
+backend/credentials.json
+client_secret*.json
+backend/client_secret*.json
+gmail_token.json
+token.json
+backend/token.json
+*token*.json
 
 # Frontend dependencies & builds
 frontend/node_modules/
@@ -43,3 +55,8 @@ frontend/out/
 frontend/build/
 frontend/.vercel/
 node_modules/
+
+# Logs
+backend/logs/
+logs/
+*.log

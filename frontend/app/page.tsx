@@ -1,8 +1,9 @@
 "use client";
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars */
 
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { Square, Check } from "lucide-react";
 
 // Components
 import { ParticleBackground } from "./components/ParticleBackground";
@@ -14,21 +15,102 @@ import { TelemetryStrip, AppMode } from "./components/TelemetryStrip";
 import { DevStateToggle } from "./components/DevStateToggle";
 import { EvalBenchmarkModal } from "./components/EvalBenchmarkModal";
 import { InterviewProtocol } from "./components/interview/InterviewProtocol";
+import { ChatMode } from "./components/ChatMode";
+import { getApiUrl, getWsUrl } from "./lib/api";
+import { AuthModal } from "./components/AuthModal";
 
 // Hooks & Types
-import { AssistantContext } from "./hooks/useAssistantState";
+import { AssistantStateProvider } from "./hooks/useAssistantState";
 import type { AssistantState, MessageItem, SystemStats } from "./components/types";
 
 export default function VocalisHome() {
-  // ─── Mode State (JARVIS vs INTERVIEW) ───
-  const [appMode, setAppMode] = useState<AppMode>("jarvis");
+  // ─── Mode State (ACTION vs CHAT vs INTERVIEW) ───
+  const [appMode, setAppMode] = useState<AppMode>("action");
+
+  // ─── User Authentication State ───
+  const [currentUser, setCurrentUser] = useState<{ id: number; email: string; display_name: string } | null>(null);
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [googleConnected, setGoogleConnected] = useState(false);
+  const [googleEmail, setGoogleEmail] = useState<string | null>(null);
+
+  const checkGoogleStatus = useCallback(() => {
+    fetch(getApiUrl("/api/auth/google/status"), { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) {
+          setGoogleConnected(Boolean(data.is_connected));
+          setGoogleEmail(data.google_email || null);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Check existing session on mount
+  useEffect(() => {
+    fetch(getApiUrl("/api/auth/me"), { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.user) {
+          setCurrentUser(data.user);
+          checkGoogleStatus();
+        }
+      })
+      .catch(() => {});
+  }, [checkGoogleStatus]);
+
+  // Listen for OAuth success popup messages
+  useEffect(() => {
+    const handleAuthMessage = (event: MessageEvent) => {
+      if (event.data?.type === "VOCALIS_GOOGLE_AUTH_SUCCESS") {
+        checkGoogleStatus();
+      }
+    };
+    window.addEventListener("message", handleAuthMessage);
+    return () => window.removeEventListener("message", handleAuthMessage);
+  }, [checkGoogleStatus]);
+
+  const handleLogout = async () => {
+    try {
+      await fetch(getApiUrl("/api/auth/logout"), {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch {}
+    setCurrentUser(null);
+    setGoogleConnected(false);
+    setGoogleEmail(null);
+  };
+
+  const handleConnectGoogle = async () => {
+    try {
+      const res = await fetch(getApiUrl("/api/auth/google/url"), { credentials: "include" });
+      const data = await res.json();
+      if (data?.auth_url) {
+        window.open(data.auth_url, "GoogleAuth", "width=600,height=700");
+      }
+    } catch {}
+  };
+
+  const handleDisconnectGoogle = async () => {
+    try {
+      await fetch(getApiUrl("/api/auth/google/disconnect"), {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch {}
+    setGoogleConnected(false);
+    setGoogleEmail(null);
+  };
 
   // ─── Core State ───
   const [rawState, setRawState] = useState<AssistantState>("idle");
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [isWsConnected, setIsWsConnected] = useState(false);
+  const [currentAgentSteps, setCurrentAgentSteps] = useState<any[]>([]);
   const [audioMuted, setAudioMuted] = useState(false);
+  const [maxTokens, setMaxTokens] = useState<number>(150);
+  const [isTalkingStopped, setIsTalkingStopped] = useState(false);
   const [isEvalOpen, setIsEvalOpen] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -45,6 +127,25 @@ export default function VocalisHome() {
   // ─── Refs ───
   const wsRef = useRef<WebSocket | null>(null);
   const recognitionRef = useRef<any>(null);
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const currentTurnIdRef = useRef<number>(0);
+
+  // ─── Central Audio Interrupt & Sequence Manager ───
+  const stopCurrentAudio = useCallback(() => {
+    if (activeAudioRef.current) {
+      activeAudioRef.current.pause();
+      activeAudioRef.current.currentTime = 0;
+      activeAudioRef.current = null;
+    }
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setRawState("idle");
+    setIsTalkingStopped(true);
+    setTimeout(() => {
+      setIsTalkingStopped(false);
+    }, 1800);
+  }, []);
 
   // ─── Context value (memoized for performance) ───
   const contextValue = useMemo(
@@ -73,7 +174,7 @@ export default function VocalisHome() {
     let ws: WebSocket;
     const connect = () => {
       try {
-        ws = new WebSocket("ws://127.0.0.1:8005/ws/stream");
+        ws = new WebSocket(getWsUrl("/ws/stream"));
         wsRef.current = ws;
 
         ws.onopen = () => {
@@ -86,15 +187,19 @@ export default function VocalisHome() {
             if (data.type === "handshake" || data.type === "pong") {
               if (data.stats) setStats(data.stats);
             } else if (data.type === "status") {
-              // Map "processing" to "thinking" in the 5-state system
               if (data.state === "processing") setRawState("thinking");
               if (data.state === "tool_use") setRawState("tool_use");
             } else if (data.type === "turn_result") {
+              // If turn_id exists and doesn't match the current turn, discard stale answer
+              if (data.turn_id && data.turn_id !== currentTurnIdRef.current) {
+                return;
+              }
+
               const res = data.data;
-              setRawState(data.audio_base64 && !audioMuted ? "speaking" : "idle");
+              stopCurrentAudio();
 
               const newMsg: MessageItem = {
-                id: Date.now().toString(),
+                id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
                 sender: "vocalis",
                 text: res.reply_text,
                 timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
@@ -114,8 +219,20 @@ export default function VocalisHome() {
               // Play audio if provided and not muted
               if (data.audio_base64 && !audioMuted) {
                 const audio = new Audio(`data:audio/mpeg;base64,${data.audio_base64}`);
-                audio.onended = () => setRawState("idle");
-                audio.play().catch(() => setRawState("idle"));
+                activeAudioRef.current = audio;
+                setRawState("speaking");
+                audio.onended = () => {
+                  if (activeAudioRef.current === audio) {
+                    activeAudioRef.current = null;
+                    setRawState("idle");
+                  }
+                };
+                audio.play().catch(() => {
+                  if (activeAudioRef.current === audio) {
+                    activeAudioRef.current = null;
+                    setRawState("idle");
+                  }
+                });
               } else {
                 setRawState("idle");
               }
@@ -139,7 +256,7 @@ export default function VocalisHome() {
     // Fetch initial system telemetry via REST
     const fetchStats = async () => {
       try {
-        const res = await fetch("http://127.0.0.1:8005/api/system/stats");
+        const res = await fetch(getApiUrl("/api/system/stats"));
         if (res.ok) {
           const json = await res.json();
           setStats(json.data);
@@ -153,12 +270,14 @@ export default function VocalisHome() {
 
     return () => {
       clearInterval(interval);
+      stopCurrentAudio();
       if (wsRef.current) wsRef.current.close();
     };
-  }, [audioMuted]);
+  }, [audioMuted, stopCurrentAudio]);
 
   // ─── Voice Speech Recognition (preserved from original) ───
   const toggleListening = () => {
+    stopCurrentAudio();
     if (rawState === "listening") {
       if (recognitionRef.current) {
         recognitionRef.current.stop();
@@ -203,9 +322,21 @@ export default function VocalisHome() {
   };
 
   // ─── Query Handling (preserved from original) ───
-  const handleSendQuery = async (query: string, includeScreen: boolean, lang: string) => {
+  const handleSendQuery = async (
+    query: string,
+    includeScreen: boolean,
+    lang: string,
+    imageBase64?: string
+  ) => {
+    // 1. Immediately cancel any currently playing or scheduled audio
+    stopCurrentAudio();
+
+    // 2. Increment turn ID to invalidate any prior pending responses
+    const turnId = ++currentTurnIdRef.current;
+
+    setCurrentAgentSteps([]);
     const userMsg: MessageItem = {
-      id: Date.now().toString(),
+      id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       sender: "user",
       text: query,
       timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
@@ -219,26 +350,35 @@ export default function VocalisHome() {
           type: "query",
           query: query,
           include_screen: includeScreen,
+          image_base64: imageBase64,
           language: lang === "auto" ? undefined : lang,
+          turn_id: turnId,
+          max_tokens: maxTokens,
         })
       );
     } else {
       // Fallback REST endpoint
       try {
-        const res = await fetch("http://127.0.0.1:8005/api/agent/command", {
+        const res = await fetch(getApiUrl("/api/agent/command"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             query: query,
+            include_screen: includeScreen,
+            image_base64: imageBase64,
             language: lang === "auto" ? undefined : lang,
             allow_actions: true,
+            max_tokens: maxTokens,
           }),
         });
         const resData = await res.json();
+        
+        // If user asked another question while this request was in flight, discard it
+        if (turnId !== currentTurnIdRef.current) return;
         setRawState("idle");
 
         const vocalisMsg: MessageItem = {
-          id: (Date.now() + 1).toString(),
+          id: `vocalis-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
           sender: "vocalis",
           text: resData.reply_text,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
@@ -254,7 +394,9 @@ export default function VocalisHome() {
         };
         setMessages((prev) => [...prev, vocalisMsg]);
       } catch (err) {
-        setRawState("idle");
+        if (turnId === currentTurnIdRef.current) {
+          setRawState("idle");
+        }
         console.error(err);
       }
     }
@@ -276,8 +418,9 @@ export default function VocalisHome() {
 
   // ─── TTS Audio Playback (preserved from original) ───
   const handlePlayAudio = async (text: string, lang?: string) => {
+    stopCurrentAudio();
     try {
-      const res = await fetch("http://127.0.0.1:8005/api/agent/tts", {
+      const res = await fetch(getApiUrl("/api/agent/tts"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, language: lang || "en" }),
@@ -286,9 +429,20 @@ export default function VocalisHome() {
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
+        activeAudioRef.current = audio;
         setRawState("speaking");
-        audio.onended = () => setRawState("idle");
-        audio.play().catch(() => setRawState("idle"));
+        audio.onended = () => {
+          if (activeAudioRef.current === audio) {
+            activeAudioRef.current = null;
+            setRawState("idle");
+          }
+        };
+        audio.play().catch(() => {
+          if (activeAudioRef.current === audio) {
+            activeAudioRef.current = null;
+            setRawState("idle");
+          }
+        });
       }
     } catch {
       setRawState("idle");
@@ -299,12 +453,12 @@ export default function VocalisHome() {
   const isActive = effectiveState !== "idle";
 
   return (
-    <AssistantContext.Provider value={contextValue}>
+    <AssistantStateProvider value={contextValue}>
       <main className="min-h-screen bg-[#030712] text-gray-100 relative overflow-x-hidden flex flex-col justify-between">
         {/* Animated particle background */}
         <ParticleBackground />
 
-        {/* Telemetry strip (thin top bar with JARVIS / INTERVIEW mode switch) */}
+        {/* Telemetry strip (thin top bar with ACTION / CHAT / INTERVIEW mode switch) */}
         <TelemetryStrip
           stats={stats}
           isConnected={isWsConnected}
@@ -313,12 +467,24 @@ export default function VocalisHome() {
           onOpenEvals={() => setIsEvalOpen(true)}
           appMode={appMode}
           onModeChange={setAppMode}
+          isSpeaking={effectiveState === "speaking"}
+          isTalkingStopped={isTalkingStopped}
+          onStopTalking={stopCurrentAudio}
+          maxTokens={maxTokens}
+          onMaxTokensChange={setMaxTokens}
+          currentUser={currentUser}
+          onOpenAuth={() => setIsAuthOpen(true)}
+          onLogout={handleLogout}
+          googleConnected={googleConnected}
+          googleEmail={googleEmail}
+          onConnectGoogle={handleConnectGoogle}
+          onDisconnectGoogle={handleDisconnectGoogle}
         />
 
         {/* ─── Mode Switching Content ─── */}
         <AnimatePresence mode="wait">
           {appMode === "interview" ? (
-            /* ─── INTERVIEW MODE (Phase 1 Protocol Setup) ─── */
+            /* ─── INTERVIEW MODE (Technical Interview Protocol) ─── */
             <motion.div
               key="interview-mode"
               initial={{ opacity: 0, y: 15 }}
@@ -329,10 +495,38 @@ export default function VocalisHome() {
             >
               <InterviewProtocol />
             </motion.div>
-          ) : (
-            /* ─── JARVIS MODE (Original Autonomous Multimodal Assistant) ─── */
+          ) : appMode === "chat" ? (
+            /* ─── CHAT MODE (Interactive Voice & Text Conversation) ─── */
             <motion.div
-              key="jarvis-mode"
+              key="chat-mode"
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -15 }}
+              transition={{ duration: 0.25 }}
+              className="flex-1 flex flex-col"
+            >
+              <ChatMode
+                messages={messages}
+                onSendQuery={handleSendQuery}
+                onToggleListening={toggleListening}
+                onConfirmAction={handleConfirmAction}
+                onCancelAction={handleCancelAction}
+                onPlayAudio={handlePlayAudio}
+                onStopTalking={stopCurrentAudio}
+                isSpeaking={effectiveState === "speaking"}
+                isTalkingStopped={isTalkingStopped}
+                maxTokens={maxTokens}
+                onMaxTokensChange={setMaxTokens}
+                isLoading={effectiveState === "thinking" || effectiveState === "tool_use"}
+                onClearChat={() => setMessages([])}
+                appMode={appMode}
+                onModeChange={setAppMode}
+              />
+            </motion.div>
+          ) : (
+            /* ─── ACTION MODE (Clean Autonomous Avatar Core & Voice Input) ─── */
+            <motion.div
+              key="action-mode"
               initial={{ opacity: 0, y: -15 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 15 }}
@@ -370,12 +564,41 @@ export default function VocalisHome() {
                   }}
                   transition={{ duration: 0.5 }}
                 >
-                  {effectiveState === "idle" && "Speak or type to command Vocalis AI..."}
+                  {effectiveState === "idle" && "Speak or type actions (e.g. send email, calendar, launch app)..."}
                   {effectiveState === "listening" && "Listening to your voice..."}
                   {effectiveState === "thinking" && "Reasoning & executing plan..."}
                   {effectiveState === "speaking" && "Responding..."}
                   {effectiveState === "tool_use" && "Autonomous tool execution active..."}
                 </motion.p>
+
+                {/* Stop Talking Button / Talking Stopped Feedback when speaking */}
+                <AnimatePresence>
+                  {effectiveState === "speaking" && (
+                    <motion.button
+                      initial={{ opacity: 0, scale: 0.8, y: 10 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.8, y: 10 }}
+                      onClick={stopCurrentAudio}
+                      className="mt-4 px-6 py-2 rounded-full bg-gradient-to-r from-red-600 via-rose-600 to-purple-600 text-white font-mono font-bold text-xs shadow-[0_0_25px_rgba(239,68,68,0.7)] hover:scale-105 transition-all flex items-center gap-2 border border-red-400/50 cursor-pointer z-30 tracking-wider"
+                      title="Stop audio playback"
+                    >
+                      <Square className="w-4 h-4 fill-white" />
+                      <span>STOP TALKING</span>
+                    </motion.button>
+                  )}
+
+                  {isTalkingStopped && (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.8, y: 10 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.8, y: 10 }}
+                      className="mt-4 px-6 py-2 rounded-full bg-emerald-950/90 border border-emerald-500/60 text-emerald-300 font-mono font-bold text-xs shadow-[0_0_20px_rgba(16,185,129,0.6)] flex items-center gap-2 z-30 tracking-wider"
+                    >
+                      <Check className="w-4 h-4 text-emerald-400" />
+                      <span>TALKING STOPPED</span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
 
               {/* Voice input bar (fixed bottom center) */}
@@ -383,6 +606,12 @@ export default function VocalisHome() {
                 onSendQuery={handleSendQuery}
                 onToggleListening={toggleListening}
                 isLoading={effectiveState === "thinking" || effectiveState === "tool_use"}
+                onStopTalking={stopCurrentAudio}
+                isTalkingStopped={isTalkingStopped}
+                maxTokens={maxTokens}
+                onMaxTokensChange={setMaxTokens}
+                appMode={appMode}
+                onModeChange={setAppMode}
               />
 
               {/* Activity & Workspace drawer (slide-in from right) */}
@@ -404,7 +633,14 @@ export default function VocalisHome() {
 
         {/* Eval benchmark modal */}
         <EvalBenchmarkModal isOpen={isEvalOpen} onClose={() => setIsEvalOpen(false)} />
+
+        {/* User Authentication modal */}
+        <AuthModal
+          isOpen={isAuthOpen}
+          onClose={() => setIsAuthOpen(false)}
+          onAuthSuccess={(user) => setCurrentUser(user)}
+        />
       </main>
-    </AssistantContext.Provider>
+    </AssistantStateProvider>
   );
 }

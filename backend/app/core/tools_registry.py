@@ -4,8 +4,18 @@ from pydantic import BaseModel
 
 from app.core.fs_tools import fs_read, fs_write, fs_edit, fs_list, fs_delete
 from app.core.terminal_tool import execute_terminal_command
-from app.core.web_tool import search_and_scrape
-from app.core.tools import execute_gui_action, launch_target, get_system_stats
+from app.core.tools import (
+    execute_gui_action,
+    launch_target,
+    get_system_stats,
+    set_brightness,
+    adjust_brightness,
+    open_settings,
+    set_wifi_state
+)
+from app.core.email_tool import send_email
+from app.core.calendar_tool import check_calendar, create_event, delete_event
+from app.core.reminder_service import create_reminder, list_reminders, cancel_reminder
 
 class ToolDefinition(BaseModel):
     name: str
@@ -135,6 +145,165 @@ TOOLS_MANIFEST: Dict[str, ToolDefinition] = {
         description="Retrieves live system hardware metrics (CPU, RAM, Disks, Network, Battery).",
         parameters={"type": "object", "properties": {}},
         risk_level="low"
+    ),
+    "send_email": ToolDefinition(
+        name="send_email",
+        description="Sends an email via Gmail API to a specified recipient address with subject and body.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "The recipient email address (e.g. 'user@example.com')"},
+                "subject": {"type": "string", "description": "Subject line of the email"},
+                "body": {"type": "string", "description": "Body content of the email"}
+            },
+            "required": ["to", "body"]
+        },
+        risk_level="high",
+        requires_approval=True
+    ),
+    "check_calendar": ToolDefinition(
+        name="check_calendar",
+        description="Retrieves scheduled events from Google Calendar for a date range (e.g. 'today', 'tomorrow', 'this week').",
+        parameters={
+            "type": "object",
+            "properties": {
+                "date_range": {"type": "string", "description": "Time window to check (e.g. 'today', 'tomorrow', 'this week')"}
+            }
+        },
+        risk_level="low",
+        requires_approval=False
+    ),
+    "create_event": ToolDefinition(
+        name="create_event",
+        description="Schedules a new meeting or event on Google Calendar.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Event title or meeting summary"},
+                "start_time": {"type": "string", "description": "Start time/date (e.g. 'tomorrow at 3pm')"},
+                "end_time": {"type": "string", "description": "End time/date (optional)"},
+                "attendees": {"type": "array", "items": {"type": "string"}, "description": "Attendee email addresses"},
+                "description": {"type": "string", "description": "Event description or agenda"}
+            },
+            "required": ["title", "start_time"]
+        },
+        risk_level="high",
+        requires_approval=True
+    ),
+    "delete_event": ToolDefinition(
+        name="delete_event",
+        description="Deletes an existing event from Google Calendar using its event ID.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string", "description": "The Google Calendar event ID to delete"}
+            },
+            "required": ["event_id"]
+        },
+        risk_level="high",
+        requires_approval=True
+    ),
+    "create_reminder": ToolDefinition(
+        name="create_reminder",
+        description="Schedules a local reminder to trigger a vocal and visual notification at a specified time.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "What to be reminded about"},
+                "due_time": {"type": "string", "description": "When the reminder should trigger (e.g. 'in 20 minutes', 'at 5pm')"}
+            },
+            "required": ["text", "due_time"]
+        },
+        risk_level="low",
+        requires_approval=False
+    ),
+    "list_reminders": ToolDefinition(
+        name="list_reminders",
+        description="Lists upcoming scheduled reminders from the local database.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "status_filter": {"type": "string", "enum": ["pending", "completed", "cancelled"], "description": "Status filter"}
+            }
+        },
+        risk_level="low",
+        requires_approval=False
+    ),
+    "cancel_reminder": ToolDefinition(
+        name="cancel_reminder",
+        description="Cancels an upcoming reminder by ID.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "reminder_id": {"type": "integer", "description": "The numeric ID of the reminder to cancel"}
+            },
+            "required": ["reminder_id"]
+        },
+        risk_level="low",
+        requires_approval=False
+    ),
+    "set_brightness": ToolDefinition(
+        name="set_brightness",
+        description="Sets the screen brightness to an absolute level between 0 and 100 percent.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "level": {"type": "integer", "description": "Target brightness level (0-100)"}
+            },
+            "required": ["level"]
+        },
+        risk_level="low",
+        requires_approval=False
+    ),
+    "adjust_brightness": ToolDefinition(
+        name="adjust_brightness",
+        description="Increases or decreases display brightness by a delta amount (e.g. +10 or -10).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "delta": {"type": "integer", "description": "Delta to adjust brightness by (e.g. 10 for brighter, -10 for dimmer)"}
+            },
+            "required": ["delta"]
+        },
+        risk_level="low",
+        requires_approval=False
+    ),
+    "open_settings": ToolDefinition(
+        name="open_settings",
+        description="Opens Windows Settings or a specific settings page (e.g. display, sound, wifi, bluetooth, battery, apps, privacy).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "page": {"type": "string", "description": "Specific settings category or page (e.g. 'display', 'wifi', 'bluetooth')"}
+            }
+        },
+        risk_level="low",
+        requires_approval=False
+    ),
+    "set_wifi_state": ToolDefinition(
+        name="set_wifi_state",
+        description="Turns Wi-Fi on or off on the Windows system.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "enabled": {"type": "boolean", "description": "True to turn on Wi-Fi, False to turn off"}
+            },
+            "required": ["enabled"]
+        },
+        risk_level="low",
+        requires_approval=False
+    ),
+    "screenshot": ToolDefinition(
+        name="screenshot",
+        description="Captures the current desktop screen state and visual UI for analysis.",
+        parameters={"type": "object", "properties": {}},
+        risk_level="low"
+    ),
+    "observe_screen": ToolDefinition(
+        name="observe_screen",
+        description="Inspects the visual screen to verify UI state or active application windows.",
+        parameters={"type": "object", "properties": {}},
+        risk_level="low"
     )
 }
 
@@ -176,6 +345,53 @@ async def execute_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, A
         elif tool_name == "system_telemetry":
             stats = get_system_stats()
             return {"status": "success", "action": "system_telemetry", "data": stats}
+        elif tool_name == "send_email":
+            to_addr = arguments.get("to") or arguments.get("recipient_email") or arguments.get("recipient_name") or ""
+            subj = arguments.get("subject")
+            body_text = arguments.get("body", "")
+            return send_email(to=to_addr, subject=subj, body=body_text)
+        elif tool_name == "check_calendar":
+            return check_calendar(date_range=arguments.get("date_range"), max_results=arguments.get("max_results", 10))
+        elif tool_name == "create_event":
+            return create_event(
+                title=arguments.get("title", "Meeting"),
+                start_time=arguments.get("start_time", ""),
+                end_time=arguments.get("end_time"),
+                attendees=arguments.get("attendees"),
+                description=arguments.get("description")
+            )
+        elif tool_name == "delete_event":
+            return delete_event(event_id=arguments.get("event_id", ""))
+        elif tool_name == "create_reminder":
+            return create_reminder(
+                text=arguments.get("text", "Reminder"),
+                due_time=arguments.get("due_time", "in 1 hour")
+            )
+        elif tool_name == "list_reminders":
+            return list_reminders(status_filter=arguments.get("status_filter", "pending"))
+        elif tool_name == "cancel_reminder":
+            rem_id = int(arguments.get("reminder_id", 0))
+            return cancel_reminder(reminder_id=rem_id)
+        elif tool_name == "set_brightness":
+            lvl = int(arguments.get("level", 50))
+            return set_brightness(level=lvl)
+        elif tool_name == "adjust_brightness":
+            d = int(arguments.get("delta", 10))
+            return adjust_brightness(delta=d)
+        elif tool_name == "open_settings":
+            return open_settings(page=arguments.get("page"))
+        elif tool_name == "set_wifi_state":
+            is_enabled = bool(arguments.get("enabled", True))
+            return set_wifi_state(enabled=is_enabled)
+        elif tool_name in ["screenshot", "observe_screen"]:
+            from app.core.multimodal import capture_screen_bytes
+            s_bytes = capture_screen_bytes()
+            return {
+                "status": "success",
+                "action": tool_name,
+                "screen_captured": True,
+                "size_bytes": len(s_bytes) if s_bytes else 0
+            }
 
         return {"status": "error", "message": f"Tool '{tool_name}' has no execution handler."}
     except Exception as e:

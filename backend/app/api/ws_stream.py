@@ -33,21 +33,36 @@ async def websocket_stream(websocket: WebSocket):
                 attach_screen = data.get("include_screen", False)
                 custom_image = data.get("image_base64")
                 lang = data.get("language")
+                turn_id = data.get("turn_id")
+                max_tokens = data.get("max_tokens")
 
                 image_bytes = None
-                if attach_screen:
-                    image_bytes = capture_screen_bytes()
-                elif custom_image:
+                if custom_image:
                     image_bytes = decode_image_bytes(custom_image)
+                elif attach_screen:
+                    image_bytes = capture_screen_bytes()
 
                 # Send processing indicator
-                await websocket.send_json({"type": "status", "state": "processing"})
+                await websocket.send_json({"type": "status", "state": "processing", "turn_id": turn_id})
+
+                # Define intermediate step progress streaming callback
+                async def stream_step(step_record: dict):
+                    try:
+                        await websocket.send_json({
+                            "type": "step_update",
+                            "turn_id": turn_id,
+                            "step": step_record
+                        })
+                    except Exception:
+                        pass
 
                 # Execute multimodal turn
                 response = await process_turn(
                     user_query=query_text,
                     image_bytes=image_bytes,
-                    client_lang=lang
+                    client_lang=lang,
+                    max_tokens=max_tokens,
+                    on_step_update=stream_step
                 )
 
                 # Optional: generate TTS audio in real-time
@@ -60,6 +75,7 @@ async def websocket_stream(websocket: WebSocket):
 
                 await websocket.send_json({
                     "type": "turn_result",
+                    "turn_id": turn_id,
                     "data": response.model_dump(),
                     "audio_base64": audio_base64
                 })
@@ -68,6 +84,8 @@ async def websocket_stream(websocket: WebSocket):
         pass
     except Exception as e:
         try:
-            await websocket.send_json({"type": "error", "message": str(e)})
+            from app.core.sanitizer import sanitize_text
+            await websocket.send_json({"type": "error", "message": sanitize_text(str(e))})
         except Exception:
             pass
+
